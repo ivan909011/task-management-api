@@ -1,69 +1,88 @@
-from typing import Annotated
+from typing import Annotated, Any
 from uuid import UUID
 
-from fastapi import Depends, FastAPI, HTTPException, Query, Response, status
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, status
 
+from task_management_api import __version__
 from task_management_api.models import Task, TaskCreate, TaskStatus, TaskUpdate
-from task_management_api.store import TaskStore
+from task_management_api.store import TaskRepository, TaskStore
+
+MAX_PAGE_SIZE = 100
+DEFAULT_PAGE_SIZE = 20
+TOTAL_COUNT_HEADER = "X-Total-Count"
+
+NOT_FOUND: dict[int | str, dict[str, Any]] = {
+    status.HTTP_404_NOT_FOUND: {"description": "Task not found"}
+}
 
 
-def create_app(store: TaskStore | None = None) -> FastAPI:
+def get_repository(request: Request) -> TaskRepository:
+    repository: TaskRepository = request.app.state.task_repository
+    return repository
+
+
+Repository = Annotated[TaskRepository, Depends(get_repository)]
+
+
+def task_not_found() -> HTTPException:
+    return HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Task not found")
+
+
+def create_app(repository: TaskRepository | None = None) -> FastAPI:
+    """Build the application. Tests pass their own repository for isolation."""
     app = FastAPI(
         title="Task Management API",
         description="REST API for managing tasks.",
-        version="0.1.0",
+        version=__version__,
     )
-    app.state.task_store = store or TaskStore()
-
-    def get_store() -> TaskStore:
-        return app.state.task_store
-
-    Store = Annotated[TaskStore, Depends(get_store)]
+    app.state.task_repository = repository if repository is not None else TaskStore()
 
     @app.get("/health", tags=["health"])
     def health() -> dict[str, str]:
         return {"status": "ok"}
 
-    @app.post("/tasks", response_model=Task, status_code=status.HTTP_201_CREATED, tags=["tasks"])
-    def create_task(payload: TaskCreate, store: Store) -> Task:
-        return store.add(Task(title=payload.title, description=payload.description))
-
-    @app.get("/tasks", response_model=list[Task], tags=["tasks"])
-    def list_tasks(
-        store: Store,
-        task_status: Annotated[TaskStatus | None, Query(alias="status")] = None,
-        limit: Annotated[int, Query(ge=1, le=100)] = 20,
-        offset: Annotated[int, Query(ge=0)] = 0,
-    ) -> list[Task]:
-        tasks = store.list()
-        if task_status is not None:
-            tasks = [task for task in tasks if task.status == task_status]
-        return tasks[offset : offset + limit]
-
-    @app.get("/tasks/{task_id}", response_model=Task, tags=["tasks"])
-    def get_task(task_id: UUID, store: Store) -> Task:
-        task = store.get(task_id)
-        if task is None:
-            raise HTTPException(status_code=404, detail="Task not found")
+    @app.post("/tasks", status_code=status.HTTP_201_CREATED, tags=["tasks"])
+    def create_task(payload: TaskCreate, repo: Repository, response: Response) -> Task:
+        task = repo.create(title=payload.title, description=payload.description)
+        response.headers["Location"] = f"/tasks/{task.id}"
         return task
 
-    @app.patch("/tasks/{task_id}", response_model=Task, tags=["tasks"])
-    def update_task(task_id: UUID, payload: TaskUpdate, store: Store) -> Task:
-        task = store.get(task_id)
-        if task is None:
-            raise HTTPException(status_code=404, detail="Task not found")
-        changes = payload.model_dump(exclude_unset=True)
-        if not changes:
-            raise HTTPException(status_code=422, detail="At least one field must be provided")
-        updated = task.model_copy(update=changes)
-        store.add(updated)
-        return updated
+    @app.get("/tasks", tags=["tasks"])
+    def list_tasks(
+        repo: Repository,
+        response: Response,
+        task_status: Annotated[TaskStatus | None, Query(alias="status")] = None,
+        limit: Annotated[int, Query(ge=1, le=MAX_PAGE_SIZE)] = DEFAULT_PAGE_SIZE,
+        offset: Annotated[int, Query(ge=0)] = 0,
+    ) -> list[Task]:
+        """List tasks in creation order. The total number of matches is in `X-Total-Count`."""
+        page = repo.list(status=task_status, limit=limit, offset=offset)
+        response.headers[TOTAL_COUNT_HEADER] = str(page.total)
+        return page.items
 
-    @app.delete("/tasks/{task_id}", status_code=status.HTTP_204_NO_CONTENT, tags=["tasks"])
-    def delete_task(task_id: UUID, store: Store) -> Response:
-        if not store.delete(task_id):
-            raise HTTPException(status_code=404, detail="Task not found")
-        return Response(status_code=status.HTTP_204_NO_CONTENT)
+    @app.get("/tasks/{task_id}", tags=["tasks"], responses=NOT_FOUND)
+    def get_task(task_id: UUID, repo: Repository) -> Task:
+        task = repo.get(task_id)
+        if task is None:
+            raise task_not_found()
+        return task
+
+    @app.patch("/tasks/{task_id}", tags=["tasks"], responses=NOT_FOUND)
+    def update_task(task_id: UUID, payload: TaskUpdate, repo: Repository) -> Task:
+        task = repo.update(task_id, payload.changes())
+        if task is None:
+            raise task_not_found()
+        return task
+
+    @app.delete(
+        "/tasks/{task_id}",
+        status_code=status.HTTP_204_NO_CONTENT,
+        tags=["tasks"],
+        responses=NOT_FOUND,
+    )
+    def delete_task(task_id: UUID, repo: Repository) -> None:
+        if not repo.delete(task_id):
+            raise task_not_found()
 
     return app
 
