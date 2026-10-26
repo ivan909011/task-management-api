@@ -1,14 +1,14 @@
 # Task Management API
 
-A REST API for managing tasks, built as a backend portfolio project with Python and FastAPI. It demonstrates endpoint design, input validation, automated tests, consistent error handling, and API documentation.
+[![CI](https://github.com/ivan909011/task-management-api/actions/workflows/ci.yml/badge.svg)](https://github.com/ivan909011/task-management-api/actions/workflows/ci.yml)
 
-> This is a demonstration project. Data is stored in memory and is lost when the server restarts. It is not intended for production use without persistence, authentication, and operational safeguards.
+A REST API for managing tasks, built with Python and FastAPI. The focus is on a precise HTTP contract, strict input validation, correctness under concurrent requests, and a test suite that pins down each of those behaviours.
 
-## Requirements
+> Data is stored in memory and is lost when the server restarts. Storage sits behind a small repository interface so it can be swapped for a database without touching the HTTP layer.
 
-- Python 3.11 or later
+## Quick start
 
-## Run locally
+Requires Python 3.11 or later.
 
 ```bash
 python3 -m venv .venv
@@ -17,52 +17,92 @@ python -m pip install -e '.[dev]'
 uvicorn task_management_api.main:app --reload
 ```
 
-Open http://127.0.0.1:8000/docs for the interactive OpenAPI documentation.
+Interactive OpenAPI docs: http://127.0.0.1:8000/docs
 
-## Run tests
+## API
 
-```bash
-pytest
+| Method | Path | Success | Errors |
+| --- | --- | --- | --- |
+| GET | `/health` | 200 | |
+| POST | `/tasks` | 201 + `Location` header | 422 |
+| GET | `/tasks` | 200 + `X-Total-Count` header | 422 |
+| GET | `/tasks/{id}` | 200 | 404, 422 |
+| PATCH | `/tasks/{id}` | 200 | 404, 422 |
+| DELETE | `/tasks/{id}` | 204 | 404, 422 |
+
+A task:
+
+```json
+{
+  "id": "6f1c2b9e-1a7e-4a53-9a51-1f6f1e0c2b7d",
+  "title": "Document the API",
+  "description": "Add usage examples",
+  "status": "pending",
+  "created_at": "2026-10-26T12:00:00Z",
+  "updated_at": "2026-10-26T12:00:00Z"
+}
 ```
 
-## Endpoints
+Validation rules:
 
-| Method | Path | Description |
-| --- | --- | --- |
-| GET | /health | Health check |
-| POST | /tasks | Create a task |
-| GET | /tasks | List tasks with filters and pagination |
-| GET | /tasks/{id} | Retrieve a task |
-| PATCH | /tasks/{id} | Partially update a task |
-| DELETE | /tasks/{id} | Delete a task |
+- `title`: required on create, 1 to 120 characters after trimming whitespace.
+- `description`: optional, up to 2000 characters, may be an empty string.
+- `status`: `pending`, `in_progress` or `done`. New tasks always start as `pending`.
+- Unknown fields are rejected, so a typo such as `"titel"` or an attempt to set `id` returns 422 instead of being silently ignored.
+- `PATCH` needs at least one field, and fields may be omitted but not set to `null`.
 
-List filters: status (pending, in_progress, done), limit (1–100), and offset.
-
-## Example
+Listing: `GET /tasks?status=pending&limit=20&offset=0`. Results are in creation order, `limit` is 1 to 100 (default 20), and `X-Total-Count` holds the number of matching tasks across all pages.
 
 ```bash
-curl -X POST http://127.0.0.1:8000/tasks \
+curl -i -X POST http://127.0.0.1:8000/tasks \
   -H 'Content-Type: application/json' \
   -d '{"title":"Document the API","description":"Add usage examples"}'
 
-curl 'http://127.0.0.1:8000/tasks?status=pending&limit=10&offset=0'
+curl -i 'http://127.0.0.1:8000/tasks?status=pending&limit=10'
+
+curl -X PATCH http://127.0.0.1:8000/tasks/<id> \
+  -H 'Content-Type: application/json' \
+  -d '{"status":"done"}'
 ```
 
-## Technical decisions
+## Development
 
-- Boundary validation: Pydantic models reject invalid input before it reaches application logic.
-- Explicit HTTP semantics: creation returns 201, deletion returns 204, missing items return 404, and invalid input returns 422.
-- Bounded pagination: the maximum page size is 100.
-- Simple separation of concerns: models, storage, and routes are in separate modules, making it straightforward to replace the in-memory store with a persistent repository.
-- Isolated tests: each test creates a fresh application and store, so test outcomes do not depend on execution order.
+```bash
+pytest --cov          # tests with branch coverage (fails under 95%)
+ruff check .          # lint
+ruff format .         # format
+mypy src tests        # strict type checking
+```
+
+CI runs all of these on every push and pull request, with tests on Python 3.11, 3.12 and 3.13.
+
+## Project layout
+
+```
+src/task_management_api/
+  main.py     HTTP layer: routes, status codes, headers
+  models.py   Pydantic schemas and validation rules
+  store.py    TaskRepository protocol and its thread-safe in-memory implementation
+tests/
+  test_api.py     HTTP contract tests, one class per endpoint
+  test_store.py   repository unit tests, including concurrency
+```
+
+## Design decisions
+
+**Partial updates reject `null`.** `PATCH` fields are optional so they can be omitted, but none of the stored fields is nullable. Earlier, `{"title": null}` passed validation and was written into the task with a 200 response, leaving it in an invalid state. The update model now rejects explicit nulls, and the store rebuilds the task with `model_validate` rather than `model_copy`, which skips validation. Both layers have regression tests.
+
+**Each repository operation is atomic.** FastAPI runs sync endpoints in a thread pool, so requests really do run concurrently. `PATCH` used to read a task and then write it back as two separate steps; a `DELETE` landing between them was silently undone and the task reappeared. `update` is now a single operation that reads and writes under one lock, and returns `None` if the task no longer exists. A database implementation would map it to one `UPDATE ... RETURNING` statement.
+
+**Storage is behind a `Protocol`.** Routes depend on `TaskRepository`, not on the in-memory class, and the app factory takes a repository argument. Tests use this for isolation (a fresh store per test), and a PostgreSQL implementation could be added without changing a route.
+
+**Filtering and pagination happen in the repository.** Pushing them down means a database implementation can use `WHERE` and `LIMIT/OFFSET` (and an index on `status`) instead of loading every row into Python. The repository also returns the total match count, which the API exposes as `X-Total-Count` so clients can paginate without guessing.
+
+**Tasks are immutable.** `Task` is a frozen model, so a task can only change through the repository's `update`, which also refreshes `updated_at`.
 
 ## Possible next steps
 
-1. Replace the in-memory store with PostgreSQL and migrations.
-2. Add authentication and per-user authorization.
-3. Measure latency and query profiles under a documented workload before optimizing.
-4. Add observability, request limits, and container deployment.
-
-## Portfolio walkthrough
-
-Be ready to explain the problem, HTTP contracts, validation rules, and test coverage. To demonstrate performance optimization with evidence, add persistence and compare before-and-after measurements under a documented workload. Do not claim performance gains without measuring them.
+1. A PostgreSQL repository with migrations, and the same test suite run against it.
+2. Authentication and per-user ownership of tasks.
+3. Cursor-based pagination, which stays stable while tasks are inserted or deleted.
+4. Load testing against the database implementation, with before and after numbers for any optimisation.
