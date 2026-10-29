@@ -106,3 +106,7 @@ tests/
 2. Authentication and per-user ownership of tasks.
 3. Cursor-based pagination, which stays stable while tasks are inserted or deleted.
 4. Load testing against the database implementation, with before and after numbers for any optimisation.
+
+## License
+
+Released under the [MIT License](LICENSE).
