@@ -6,6 +6,10 @@ A REST API for managing tasks, built with Python and FastAPI. The focus is on a 
 
 > Data is stored in memory and is lost when the server restarts. Storage sits behind a small repository interface so it can be swapped for a database without touching the HTTP layer.
 
+**Who it's for:** it's my personal backend project, and it also works as a small, fully tested FastAPI reference for developers who want to see validation, pagination and concurrency handled carefully.
+
+**Built with:** Python 3.11+, FastAPI, Pydantic v2 and Uvicorn. Tooling: pytest, pytest-cov, ruff, mypy (strict) and GitHub Actions.
+
 ## Quick start
 
 Requires Python 3.11 or later.
@@ -100,12 +104,9 @@ tests/
 
 **Tasks are immutable.** `Task` is a frozen model, so a task can only change through the repository's `update`, which also refreshes `updated_at`.
 
-## Possible next steps
+## Roadmap
 
-1. A PostgreSQL repository with migrations, and the same test suite run against it.
-2. Authentication and per-user ownership of tasks.
-3. Cursor-based pagination, which stays stable while tasks are inserted or deleted.
-4. Load testing against the database implementation, with before and after numbers for any optimisation.
+Planned work, with estimates, is in [ROADMAP.md](ROADMAP.md). The main items are a PostgreSQL repository, authentication, cursor-based pagination and load testing.
 
 ## License
 
